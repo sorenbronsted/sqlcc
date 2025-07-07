@@ -1,5 +1,5 @@
 [project]
-name = "sqlccc_soren_bronsted.dk-1963   "
+name = "sqlccc_soren_bronsted.dk-1963"
 version = "1.0.0"
 authors = [
   { name="Søren Brønsted", email="soren@bronsted.dk" },
