@@ -9,9 +9,9 @@ Args:
 Returns:
     int: The calculated cyclomatic complexity.
 """
-def calc(sql: str) -> int:
+def calc(sql: str, dialect='snowflake') -> int:
     result = 1
-    parsed = sg.parse_one(sql)
+    parsed = sg.parse_one(sql,dialect=dialect)
     cyclomatics = [
         # Logic
         sg.exp.And, sg.exp.Or, sg.exp.In, sg.exp.Between, sg.exp.Like, sg.exp.Group,
