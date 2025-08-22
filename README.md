@@ -4,7 +4,9 @@ calculator for SQL
 
 ## Usage
 
-```bash
-sqlcc <file.sql>
 ```
-which output a number representing the cyclomatic complexity of the SQL file.
+    ...
+    cc = sqlcc('select a, b from foo')
+    ...
+```
+which returns a number representing the cyclomatic complexity of the SQL.
