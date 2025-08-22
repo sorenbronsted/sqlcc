@@ -5,6 +5,7 @@ Calculate the cyclomatic complexity of a SQL query.
 
 Args:
     sql (str): The SQL query string.
+    dialect (str): The SQL dialect to use for parsing. See sqlglot documentation for supported dialects.
 
 Returns:
     int: The calculated cyclomatic complexity.
