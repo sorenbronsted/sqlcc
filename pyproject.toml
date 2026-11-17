@@ -4,15 +4,21 @@ version = "1.1.1"
 authors = [
   { name="Søren Brønsted", email="soren@bronsted.dk" },
 ]
-description = "A cyclomatix complexity calculator for SQL"
+description = "A cyclomatic complexity calculator for SQL"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "sqlglot>=27.29.0,<31",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+
+[project.scripts]
+sqlcc = "sqlcc:main"
 
 [project.urls]
 Homepage = "https://github.com/sorenbronsted/sqlcc"
