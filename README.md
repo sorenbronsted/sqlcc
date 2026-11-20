@@ -28,6 +28,10 @@ The SQL can contain several statements, in which case the complexity of all of t
 * `ValueError` if the SQL contains no statements, or the dialect is unknown
 * `sqlglot.errors.ParseError` if the SQL can not be parsed
 
+`loc(sql, dialect='snowflake')` returns the lines of code, which are the lines with something on them besides
+whitespace and comments. A string which spans several lines counts every line it is on. It raises `TypeError` if the SQL
+is not a string, `ValueError` if the dialect is unknown and `sqlglot.errors.TokenError` if the SQL can not be tokenized.
+
 `crap(complexity, coverage)` returns the [CRAP1 score](https://testing.googleblog.com/2011/02/this-code-is-crap.html),
 `complexity^2 * (1 - coverage/100)^3 + complexity`, where the coverage is in percent. It is never lower than the
 complexity. `coverage_from_tests(tests, complexity)` estimates the coverage from a number of tests, see
@@ -38,10 +42,11 @@ complexity. `coverage_from_tests(tests, complexity)` estimates the coverage from
 ```
 sqlcc target/compiled/my_project/models
 ```
-prints the complexity of every `.sql` file found in the directories (or of the files) given, the highest first:
+prints the complexity and the lines of code (see `loc`) of every `.sql` file found in the directories (or of the files)
+given, the highest complexity first:
 ```
-     8  target/compiled/my_project/models/marts/fct_orders.sql
-     2  target/compiled/my_project/models/staging/stg_orders.sql
+     8     120  target/compiled/my_project/models/marts/fct_orders.sql
+     2      35  target/compiled/my_project/models/staging/stg_orders.sql
 ```
 followed, on stderr, by a summary. `python -m sqlcc` does the same.
 
@@ -83,13 +88,13 @@ sqlcc --crap --manifest /tmp/dbt_sqlcc/manifest.json --max-crap 100
 ```
 It prints the models with the highest score first:
 ```
-     CRAP   COMP    COV%  TESTS  MISSING  MODEL
-     24.9      7    28.6      2        5  model.shop.fct_orders
-      2.0      2   100.0      3        0  model.shop.stg_customers
-      2.0      2   100.0      5        0  model.shop.stg_orders
+     CRAP   COMP     LOC    COV%  TESTS  MISSING  MODEL
+     24.9      7      42    28.6      2        5  model.shop.fct_orders
+      2.0      2      18   100.0      3        0  model.shop.stg_customers
+      2.0      2      15   100.0      5        0  model.shop.stg_orders
 ```
-`COMP` is the complexity of the compiled SQL, `COV%` the estimated coverage, `TESTS` the number of tests and `MISSING`
-the number of tests it takes to get to 100%. `CRAP` is `COMP^2 * (1 - COV/100)^3 + COMP`.
+`COMP` is the complexity of the compiled SQL, `LOC` its lines of code, `COV%` the estimated coverage, `TESTS` the number
+of tests and `MISSING` the number of tests it takes to get to 100%. `CRAP` is `COMP^2 * (1 - COV/100)^3 + COMP`.
 
 **The coverage is an estimate.** CRAP is defined on the basis path coverage of the automated tests, but a dbt test
 asserts something about the data and does not run the paths of the SQL. The complexity is the number of tests it takes

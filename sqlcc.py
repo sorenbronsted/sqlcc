@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import json
 import os
 import sys
@@ -104,6 +105,34 @@ def calc(sql: str, dialect: str = DEFAULT_DIALECT) -> int:
     return 1 + sum(_weight(node) for statement in statements for node in statement.walk())
 
 
+def loc(sql: str, dialect: str = DEFAULT_DIALECT) -> int:
+    """
+    Count the lines of code in SQL, which are the lines with something on them besides whitespace and comments.
+
+    A token which spans several lines, like a string, counts every line it is on.
+
+    Args:
+        sql (str): The SQL string, with any number of statements.
+        dialect (str): The SQL dialect to use for tokenizing. See sqlglot documentation for supported dialects.
+
+    Returns:
+        int: The number of lines of code, 0 if there is only whitespace and comments.
+
+    Raises:
+        TypeError: If sql is not a string.
+        ValueError: If the dialect is unknown.
+        sqlglot.errors.TokenError: If sql can not be tokenized with the dialect.
+    """
+    if not isinstance(sql, str):
+        raise TypeError(f"sql must be a str, not {type(sql).__name__}")
+    line_starts = [0] + [index + 1 for index, char in enumerate(sql) if char == '\n']
+    lines = set()
+    for token in sg.tokenize(sql, read=dialect):
+        first, last = (bisect.bisect_right(line_starts, offset) for offset in (token.start, token.end))
+        lines.update(range(first, last + 1))
+    return len(lines)
+
+
 def crap(complexity: int, coverage: float) -> float:
     """
     Calculate CRAP1, the change risk anti-pattern score: complexity^2 * (1 - coverage/100)^3 + complexity.
@@ -150,6 +179,7 @@ class ModelScore:
     name: str
     complexity: int
     tests: int
+    loc: int
 
     @property
     def coverage(self) -> float:
@@ -229,16 +259,19 @@ def _first_line(e: Exception) -> str:
     return (str(e).splitlines() or [type(e).__name__])[0]
 
 
-def _score_files(files: list[Path], dialect: str) -> tuple[dict[Path, int], dict[Path, str], list[Path]]:
-    scores, failed, skipped = {}, {}, []
+def _score_files(
+    files: list[Path], dialect: str
+) -> tuple[dict[Path, int], dict[Path, int], dict[Path, str], list[Path]]:
+    scores, locs, failed, skipped = {}, {}, {}, []
     for file in files:
         try:
-            scores[file] = calc(file.read_text(encoding='utf-8'), dialect=dialect)
+            sql = file.read_text(encoding='utf-8')
+            scores[file], locs[file] = calc(sql, dialect=dialect), loc(sql, dialect=dialect)
         except (OSError, UnicodeDecodeError, sg.errors.SqlglotError) as e:
             failed[file] = _first_line(e)
         except ValueError:
             skipped.append(file)
-    return scores, failed, skipped
+    return scores, locs, failed, skipped
 
 
 def _read_manifest(path: Path) -> dict:
@@ -287,7 +320,9 @@ def _score_models(manifest: dict, dialect: str) -> tuple[list[ModelScore], dict[
     scores, failed, skipped = [], {}, {}
     for unique_id, node in _models(manifest).items():
         try:
-            scores.append(ModelScore(unique_id, calc(_compiled_sql(node), dialect=dialect), tests[unique_id]))
+            sql = _compiled_sql(node)
+            scores.append(ModelScore(unique_id, calc(sql, dialect=dialect), tests[unique_id],
+                                     loc(sql, dialect=dialect)))
         except _Skipped as e:
             skipped[unique_id] = str(e)
         except sg.errors.SqlglotError as e:
@@ -300,8 +335,8 @@ def _score_models(manifest: dict, dialect: str) -> tuple[list[ModelScore], dict[
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='sqlcc',
-        description='Calculate the cyclomatic complexity of SQL files, e.g. the models dbt compiles to target/compiled, '
-                    'or with --crap the CRAP score of the models in a dbt manifest.',
+        description='Calculate the cyclomatic complexity and the lines of code of SQL files, e.g. the models dbt '
+                    'compiles to target/compiled, or with --crap the CRAP score of the models in a dbt manifest.',
         epilog='Exit status: 0 when everything is scored and nothing exceeds --max or --max-crap, '
                '1 when something exceeds them, '
                '2 when something can not be scored or the arguments are invalid.',
@@ -331,9 +366,9 @@ def _exceeding(values: dict, limit: float | None) -> dict:
     return {key: value for key, value in values.items() if value > limit}
 
 
-def _print_scores(scores: dict[Path, int]) -> None:
+def _print_scores(scores: dict[Path, int], locs: dict[Path, int]) -> None:
     for file, score in sorted(scores.items(), key=lambda item: (-item[1], str(item[0]))):
-        print(f"{score:>6}  {file}")
+        print(f"{score:>6}  {locs[file]:>6}  {file}")
     sys.stdout.flush()
 
 
@@ -351,9 +386,9 @@ def _print_diagnostics(scores: dict[Path, int], failed: dict[Path, str], skipped
 
 
 def _print_models(scores: list[ModelScore]) -> None:
-    print(f"{'CRAP':>9}  {'COMP':>5}  {'COV%':>6}  {'TESTS':>5}  {'MISSING':>7}  MODEL")
+    print(f"{'CRAP':>9}  {'COMP':>5}  {'LOC':>6}  {'COV%':>6}  {'TESTS':>5}  {'MISSING':>7}  MODEL")
     for score in sorted(scores, key=lambda score: (-score.crap, score.name)):
-        print(f"{score.crap:>9.1f}  {score.complexity:>5}  {score.coverage:>6.1f}  {score.tests:>5}  "
+        print(f"{score.crap:>9.1f}  {score.complexity:>5}  {score.loc:>6}  {score.coverage:>6.1f}  {score.tests:>5}  "
               f"{score.missing:>7}  {score.name}")
     sys.stdout.flush()
 
@@ -395,9 +430,9 @@ def _run_files(args: argparse.Namespace) -> int:
         print(f"sqlcc: error: {e}", file=sys.stderr)
         return 2
 
-    scores, failed, skipped = _score_files(files, dialect)
+    scores, locs, failed, skipped = _score_files(files, dialect)
     exceeding = _exceeding(scores, args.max_score)
-    _print_scores(scores)
+    _print_scores(scores, locs)
     _print_diagnostics(scores, failed, skipped, exceeding, args.max_score)
     if failed:
         return 2

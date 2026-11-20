@@ -276,6 +276,52 @@ class SqlCcTest(unittest.TestCase):
             sqlcc.calc("selec from")
 
 
+class SqlCcLocTest(unittest.TestCase):
+    def test_every_line_with_code_counts(self):
+        self.assertEqual(1, sqlcc.loc("select 1"))
+        self.assertEqual(3, sqlcc.loc("select a,\n    b\nfrom t\n"))
+
+    def test_blank_lines_do_not_count(self):
+        self.assertEqual(2, sqlcc.loc("select a\n\n   \n\t\nfrom t\n\n"))
+
+    def test_comments_do_not_count(self):
+        sql = ("-- head\nselect a, -- trailing\n  b /* inline */\n"
+               "/* block\nover lines */\nfrom t\n/* only a comment */\n")
+        self.assertEqual(3, sqlcc.loc(sql))
+
+    def test_a_string_over_several_lines_counts_every_line(self):
+        self.assertEqual(3, sqlcc.loc("select 'a\nb\nc' as x"))
+        self.assertEqual(3, sqlcc.loc("select 'a\n\nc' as x"))
+
+    def test_nothing_but_comments_and_whitespace_is_zero(self):
+        for sql in ["", "  \n ", "-- just a comment", "/* a\nblock */", "-- a\n\n/* b */\n"]:
+            with self.subTest(sql=sql):
+                self.assertEqual(0, sqlcc.loc(sql))
+
+    def test_multiple_statements(self):
+        self.assertEqual(2, sqlcc.loc("select 1;\nselect 2;\n"))
+        self.assertEqual(1, sqlcc.loc("select 1; select 2;"))
+
+    def test_line_endings(self):
+        self.assertEqual(2, sqlcc.loc("select a\r\nfrom t\r\n"))
+        self.assertEqual(2, sqlcc.loc("select a\r\n\r\nfrom t"))
+
+    def test_dialect(self):
+        self.assertEqual(2, sqlcc.loc("select `a`\nfrom `t`", dialect='mysql'))
+
+    def test_unknown_dialect(self):
+        with self.assertRaises(ValueError):
+            sqlcc.loc("select 1", dialect='nope')
+
+    def test_not_a_string(self):
+        with self.assertRaises(TypeError):
+            sqlcc.loc(None)
+
+    def test_sql_which_can_not_be_tokenized(self):
+        with self.assertRaises(sg.errors.TokenError):
+            sqlcc.loc("select 'abc")
+
+
 class CliTestCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -305,21 +351,23 @@ class SqlCcCliTest(CliTestCase):
     BACKTICKS = "select `a` from `t` where a = 1 and b = 2"
 
     def test_scores_directory_recursively_highest_first(self):
-        self.write('a.sql', "select a from t where a = 1 and b = 2")
+        self.write('a.sql', "-- the orders\nselect a\nfrom t\nwhere a = 1 and b = 2\n")
         self.write('b.sql', "select 1")
-        self.write('sub/c.sql', "select * from a join b on a.id = b.id join c on a.id = c.id join d on a.id = d.id")
+        self.write('sub/c.sql', "select *\nfrom a\njoin b on a.id = b.id\njoin c on a.id = c.id\n"
+                                "join d on a.id = d.id\n")
         code, out, err = self.run_cli(self.root)
         self.assertEqual(0, code)
         rows = [line.split() for line in out.splitlines()]
         self.assertEqual(['4', '3', '1'], [row[0] for row in rows])
-        self.assertEqual(['c.sql', 'a.sql', 'b.sql'], [Path(row[1]).name for row in rows])
+        self.assertEqual(['5', '3', '1'], [row[1] for row in rows])
+        self.assertEqual(['c.sql', 'a.sql', 'b.sql'], [Path(row[2]).name for row in rows])
         self.assertIn("3 files scored, max 4, average 2.7", err)
 
     def test_single_file(self):
-        file = self.write('a.sql', "select a from t where a = 1 and b = 2")
+        file = self.write('a.sql', "select a\nfrom t\nwhere a = 1 and b = 2")
         code, out, err = self.run_cli(file)
         self.assertEqual(0, code)
-        self.assertEqual(['3', str(file)], out.split())
+        self.assertEqual(['3', '3', str(file)], out.split())
 
     def test_skips_compiled_dbt_tests(self):
         self.write('models/a.sql', "select 1")
@@ -329,7 +377,7 @@ class SqlCcCliTest(CliTestCase):
         self.assertEqual(1, len(out.splitlines()))
         self.assertNotIn('not_null_a_id', out)
         code, out, err = self.run_cli(test)
-        self.assertEqual(['2', str(test)], out.split())
+        self.assertEqual(['2', '1', str(test)], out.split())
 
     def test_max(self):
         self.write('a.sql', "select a from t where a = 1 and b = 2")
@@ -468,9 +516,9 @@ class SqlCcCrapTest(unittest.TestCase):
 FCT_ORDERS = 'model.shop.fct_orders'
 STG_CUSTOMERS = 'model.shop.stg_customers'
 STG_ORDERS = 'model.shop.stg_orders'
-# complexity 7: 1 + 2 when + left join + where + in + and
-FCT_ORDERS_SQL = ("select o.id, case when o.amount > 10 then 'big' when o.amount > 2 then 'mid' else 'small' end as size "
-                  "from stg_orders o left join stg_customers c on o.customer_id = c.id "
+# complexity 7: 1 + 2 when + left join + where + in + and, on 3 lines
+FCT_ORDERS_SQL = ("select o.id, case when o.amount > 10 then 'big' when o.amount > 2 then 'mid' else 'small' end as size\n"
+                  "from stg_orders o left join stg_customers c on o.customer_id = c.id\n"
                   "where o.status in ('paid', 'open') and o.amount > 0")
 UNION_SQL = "select 1 as id union all select 2 as id"
 
@@ -527,14 +575,14 @@ class SqlCcCrapCliTest(CliTestCase):
     def test_scores_models_highest_crap_first(self):
         code, out, err = self.run_crap(shop_manifest())
         self.assertEqual(0, code)
-        self.assertEqual(['CRAP', 'COMP', 'COV%', 'TESTS', 'MISSING', 'MODEL'], out.splitlines()[0].split())
+        self.assertEqual(['CRAP', 'COMP', 'LOC', 'COV%', 'TESTS', 'MISSING', 'MODEL'], out.splitlines()[0].split())
         # fct_orders: 2 tests, a unique and the unit test, so 2 of 7 paths, 28.6%: 49 * (5/7)^3 + 7
         # stg_customers: 3 tests, a unique, a not null and the singular test, relationships belongs to stg_orders
         # stg_orders: 5 tests, with the one with severity warn, but without the disabled one
         self.assertEqual([
-            ['24.9', '7', '28.6', '2', '5', FCT_ORDERS],
-            ['2.0', '2', '100.0', '3', '0', STG_CUSTOMERS],
-            ['2.0', '2', '100.0', '5', '0', STG_ORDERS],
+            ['24.9', '7', '3', '28.6', '2', '5', FCT_ORDERS],
+            ['2.0', '2', '1', '100.0', '3', '0', STG_CUSTOMERS],
+            ['2.0', '2', '1', '100.0', '5', '0', STG_ORDERS],
         ], self.rows(out))
         self.assertIn("3 models scored, max CRAP 24.9, 0 without tests", err)
 
@@ -546,7 +594,10 @@ class SqlCcCrapCliTest(CliTestCase):
         })
         code, out, err = self.run_crap(manifest)
         self.assertEqual(0, code)
-        self.assertEqual([['2.0', '1', '0.0', '0', '1', b], ['1.0', '1', '100.0', '1', '0', a]], self.rows(out))
+        self.assertEqual([
+            ['2.0', '1', '1', '0.0', '0', '1', b],
+            ['1.0', '1', '1', '100.0', '1', '0', a],
+        ], self.rows(out))
         self.assertIn("1 without tests", err)
 
     def test_singular_and_unit_tests_are_credited_to_every_model_they_depend_on(self):
@@ -557,7 +608,10 @@ class SqlCcCrapCliTest(CliTestCase):
         )
         code, out, err = self.run_crap(manifest)
         self.assertEqual(0, code)
-        self.assertEqual([['1.0', '1', '100.0', '2', '0', a], ['1.0', '1', '100.0', '1', '0', b]], self.rows(out))
+        self.assertEqual([
+            ['1.0', '1', '1', '100.0', '2', '0', a],
+            ['1.0', '1', '1', '100.0', '1', '0', b],
+        ], self.rows(out))
 
     def test_max_crap(self):
         code, out, err = self.run_crap(shop_manifest(), '--max-crap', 24)
@@ -678,7 +732,7 @@ class SqlCcCrapCliTest(CliTestCase):
         manifest = manifest_of({'model.shop.a': model(self.BACKTICKS)}, adapter_type='mysql')
         code, out, err = self.run_crap(manifest)
         self.assertEqual(0, code)
-        self.assertEqual([['12.0', '3', '0.0', '0', '3', 'model.shop.a']], self.rows(out))
+        self.assertEqual([['12.0', '3', '1', '0.0', '0', '3', 'model.shop.a']], self.rows(out))
 
     def test_dialect_option_overrides_the_adapter_type(self):
         manifest = manifest_of({'model.shop.a': model(self.BACKTICKS)}, adapter_type='snowflake')
