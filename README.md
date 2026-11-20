@@ -136,16 +136,20 @@ The complexity starts at 1 and each of the following adds to it:
 
 | Construct                                                                                        | Adds                       |
 |--------------------------------------------------------------------------------------------------|----------------------------|
-| `WHERE`                                                                                          | 1 per clause               |
+| `WHERE`, `HAVING`, `QUALIFY`                                                                     | 1 per clause               |
 | `AND`, `OR`                                                                                      | 1 each                     |
-| `IN`, `BETWEEN`, `LIKE`, `ILIKE`                                                                 | 1 each                     |
+| `IN`, `BETWEEN`, `LIKE`, `ILIKE`, `SIMILAR TO`, `ANY`, `ALL`                                     | 1 each                     |
 | `GROUP BY`                                                                                       | 1                          |
 | `WHEN` branch of a `CASE`, and `IF`, `IFF` (the `CASE` itself adds nothing)                      | 1 per branch or call       |
 | `COALESCE`, `NVL`, `IFNULL`, `NULLIF`, `NVL2`, `DECODE`, `GREATEST`, `LEAST`, `EXISTS`           | 1 per call                 |
-| `TRY_CAST`, `SAFE_CAST`                                                                          | 1 per call                 |
-| `REGEXP_LIKE`, `RLIKE`, `CONTAINS`, `STARTSWITH`, `ENDSWITH`, `ARRAY_CONTAINS`, `COUNT_IF`       | 1 per call                 |
+| `LAG`, `LEAD`                                                                                    | 1 per call                 |
+| `TRY_CAST`, `SAFE_CAST`, `SAFE_DIVIDE`, `TRY_TO_NUMBER`, `TRY_CONVERT` and other `TRY_`/`SAFE_`  | 1 per call                 |
+| `REGEXP_LIKE`, `RLIKE`, `CONTAINS`, `STARTSWITH`, `ENDSWITH`, `ARRAY_CONTAINS`, `ARRAYS_OVERLAP` | 1 per call                 |
+| `COUNT_IF`                                                                                       | 1 per call                 |
 | `JOIN` of any kind, including a comma join                                                       | 1 per join                 |
 | `UNION`, `INTERSECT`, `EXCEPT`                                                                   | 1 per operator             |
+| `WITH RECURSIVE`, `CONNECT BY`                                                                   | 1 each                     |
+| `WHEN` of a `MERGE` or multi table `INSERT`, `ON CONFLICT`, `ON DUPLICATE KEY`                   | 1 each                     |
 
 Everything is counted anywhere in the SQL, including subqueries and CTEs. A construct is only counted once.
 
@@ -156,15 +160,30 @@ adds 1 for the join and 1 for the `AND`.
 **A function counts when it branches**, which means that the path through the SQL depends on the data, and a test is
 needed for each path. `COALESCE` has a path for a NULL and one for a value. `CAST`, `LOWER`, `TRIM`, `CONCAT` and
 `SUBSTRING` do the same whatever the data is, and so they add nothing. Neither do the aggregates (`COUNT`, `SUM`,
-`MAX`, ...) and the window functions, as they change the grain and do not branch, and `GROUP BY` counts on its own.
-`TRY_CAST` counts, because a value which can not be converted gives NULL, which is a path of its own. A function
-which sqlglot does not know adds nothing either, as nothing can be said about it.
+`MAX`, ...), as they change the grain and do not branch, and `GROUP BY` counts on its own.
+`TRY_CAST` counts, because a value which can not be converted gives NULL, which is a path of its own. So do the other
+functions which give NULL instead of an error, like `TRY_TO_NUMBER`, `TRY_CONVERT`, `TRY_PARSE_JSON` and `SAFE_DIVIDE`,
+also when sqlglot does not know them but their name starts with `TRY_` or `SAFE_`. Any other function which sqlglot does
+not know adds nothing, as nothing can be said about it.
 
-`HAVING` adds nothing itself. Its expression can have any length, so it is counted by what it contains, like `AND`
-and `BETWEEN`. That is also why `HAVING COUNT(*) BETWEEN 1 AND 3` and `HAVING COUNT(*) >= 1 AND COUNT(*) <= 3` get the
-same complexity.
+**A clause which filters rows counts**, and `WHERE`, `HAVING` and `QUALIFY` do. The expression of the filter can have
+any length, so it is also counted by what it contains, like `AND` and `BETWEEN`. That is why
+`HAVING COUNT(*) BETWEEN 1 AND 3` and `HAVING COUNT(*) >= 1 AND COUNT(*) <= 3` get the same complexity.
 
-Not counted (yet): comparisons, subqueries, CTEs, window functions in themselves and `QUALIFY`.
+**A window function does not filter and does not branch**, except `LAG` and `LEAD`: the first or last row of a
+partition has no neighbour, which gives NULL or the default, so they count 1 per call. `ROW_NUMBER`, `RANK`, `SUM() OVER`
+and the like add nothing, and a filter on them is counted by the filter. `QUALIFY ROW_NUMBER() OVER (...) = 1` and
+`SELECT ... FROM (SELECT ROW_NUMBER() OVER (...) AS rn ...) WHERE rn = 1` therefore get the same complexity.
+
+**A loop counts**: a recursive CTE (`WITH RECURSIVE`) and `CONNECT BY` repeat until nothing is left, and count 1 each, in
+addition to the `UNION` and the `WHERE` they have.
+
+**A statement which branches counts**: each `WHEN` of a `MERGE` (`MATCHED`, `NOT MATCHED`) and of a multi table
+`INSERT ALL WHEN` counts 1, but the `ELSE` of the `INSERT` does not, like the `ELSE` of a `CASE`. `ON CONFLICT` and
+`ON DUPLICATE KEY` count 1. The `IN` of a `PIVOT` lists the columns and is not a predicate, so it does not count, and
+`LIKE ANY (...)` counts as the `LIKE` and not as an `ANY` too.
+
+Not counted (yet): comparisons, also `IS NULL` and `IS DISTINCT FROM`, subqueries and CTEs.
 The weights are defined in `WEIGHTS` in `sqlcc.py`. `COALESCE` counts 1 however many arguments it has.
 
 Which functions sqlglot knows depends on its version, and an unknown function adds nothing. For example, `IFF` in the

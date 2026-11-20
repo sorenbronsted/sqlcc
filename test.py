@@ -52,12 +52,24 @@ class SqlCcTest(unittest.TestCase):
     def test_group(self):
         self.assertEqual(2, sqlcc.calc("select a from t group by a"))
 
-    def test_having_is_counted_by_its_content(self):
-        self.assertEqual(2, sqlcc.calc("select a from t group by a having a > 1"))
-        # 1 + group by + between
-        self.assertEqual(3, sqlcc.calc("select a from t group by a having count(*) between 1 and 3"))
-        # 1 + group by + and, which is the same as with between, as count does not branch
-        self.assertEqual(3, sqlcc.calc("select a from t group by a having count(*) >= 1 and count(*) <= 3"))
+    def test_having_counts_like_where_and_its_content_is_counted_too(self):
+        # 1 + group by + having
+        self.assertEqual(3, sqlcc.calc("select a from t group by a having a > 1"))
+        # 1 + group by + having + between
+        self.assertEqual(4, sqlcc.calc("select a from t group by a having count(*) between 1 and 3"))
+        # 1 + group by + having + and, which is the same as with between, as count does not branch
+        self.assertEqual(4, sqlcc.calc("select a from t group by a having count(*) >= 1 and count(*) <= 3"))
+
+    def test_qualify_counts_like_where(self):
+        # 1 + qualify
+        self.assertEqual(2, sqlcc.calc("select a from t qualify row_number() over (partition by a order by b) = 1"))
+        # 1 + qualify + and
+        self.assertEqual(3, sqlcc.calc("select a from t qualify row_number() over (order by b) = 1 and a > 1"))
+
+    def test_a_filter_on_a_window_function_counts_the_same_in_qualify_and_in_a_where(self):
+        qualify = "select a from t qualify row_number() over (partition by a order by b) = 1"
+        where = "select a from (select a, row_number() over (partition by a order by b) as rn from t) where rn = 1"
+        self.assertEqual(sqlcc.calc(qualify), sqlcc.calc(where))
 
     def test_set_operations(self):
         self.assertEqual(2, sqlcc.calc("select a from t union select a from u"))
@@ -79,6 +91,7 @@ class SqlCcTest(unittest.TestCase):
             "select concat(a, b), substring(a, 1, 2), replace(a, 'x', 'y'), md5(a) from t",
             "select count(*), sum(a), min(a), max(a) from t",
             "select row_number() over (partition by a order by b) from t",
+            "select rank() over (order by b), sum(a) over (partition by b), first_value(a) over (order by b) from t",
             "select current_timestamp() from t",
         ]:
             with self.subTest(sql=sql):
@@ -102,6 +115,15 @@ class SqlCcTest(unittest.TestCase):
             "select zeroifnull(a) from t",
             "select try_cast(a as int) from t",
             "select count_if(a > 1) from t",
+            "select lag(a) over (order by b) from t",
+            "select lag(a, 1, 0) over (partition by c order by b) from t",
+            "select lead(a) over (order by b) from t",
+            "select try_to_number(a) from t",
+            "select try_to_decimal(a, 10, 2) from t",
+            "select try_to_date(a) from t",
+            "select try_to_timestamp(a) from t",
+            "select try_to_boolean(a) from t",
+            "select try_parse_json(a) from t",
         ]:
             with self.subTest(sql=sql):
                 self.assertEqual(2, sqlcc.calc(sql))
@@ -109,6 +131,7 @@ class SqlCcTest(unittest.TestCase):
     def test_functions_which_branch_count_each_time(self):
         self.assertEqual(3, sqlcc.calc("select coalesce(nullif(a, ''), b) from t"))
         self.assertEqual(3, sqlcc.calc("select greatest(a, b), least(a, b) from t"))
+        self.assertEqual(3, sqlcc.calc("select lag(a) over (order by b), lead(a) over (order by b) from t"))
 
     def test_functions_which_are_predicates_count(self):
         for predicate in ["regexp_like(a, 'x')", "startswith(a, 'x')", "endswith(a, 'x')", "contains(a, 'x')",
@@ -116,6 +139,86 @@ class SqlCcTest(unittest.TestCase):
             with self.subTest(predicate=predicate):
                 # 1 + where + the predicate
                 self.assertEqual(3, sqlcc.calc(f"select a from t where {predicate}"))
+
+    def test_try_and_safe_functions_of_other_dialects_count(self):
+        for dialect, sql in [
+            ('bigquery', "select safe_divide(a, b) from t"),
+            ('bigquery', "select safe_cast(a as int64) from t"),
+            ('tsql', "select try_convert(int, a) from t"),
+            ('tsql', "select try_parse(a as int) from t"),
+            ('databricks', "select try_divide(a, b) from t"),
+        ]:
+            with self.subTest(sql=sql):
+                self.assertEqual(2, sqlcc.calc(sql, dialect=dialect))
+
+    @unittest.skipUnless(hasattr(sg.exp, 'SafeFunc'), "sqlglot only knows SAFE. from a later version")
+    def test_safe_prefix_of_bigquery_counts(self):
+        self.assertEqual(2, sqlcc.calc("select safe.parse_date('%Y', a) from t", dialect='bigquery'))
+
+    def test_conversions_which_do_not_fail_to_null_do_not_count(self):
+        self.assertEqual(1, sqlcc.calc("select to_number(a), to_date(a), parse_json(a), to_boolean(a) from t"))
+        self.assertEqual(1, sqlcc.calc("select convert(int, a) from t", dialect='tsql'))
+
+    def test_concat_does_not_count_in_any_dialect(self):
+        # sqlglot sets safe on a CONCAT in some dialects, which is about NULL arguments and not about failing
+        for dialect in ['snowflake', 'duckdb', 'oracle', 'sqlite', 'mysql', 'postgres', 'bigquery', 'tsql']:
+            with self.subTest(dialect=dialect):
+                self.assertEqual(1, sqlcc.calc("select concat(a, b), concat_ws(',', a, b) from t", dialect=dialect))
+        for dialect in ['snowflake', 'duckdb', 'oracle', 'sqlite', 'postgres']:
+            with self.subTest(dialect=dialect, operator='||'):
+                self.assertEqual(1, sqlcc.calc("select a || b from t", dialect=dialect))
+
+    def test_predicates_which_are_not_functions_count(self):
+        for dialect, predicate in [
+            ('snowflake', "a similar to 'x'"),
+            ('snowflake', "a > any (select b from u)"),
+            ('snowflake', "a > all (select b from u)"),
+            ('postgres', "a = any(array[1, 2])"),
+            ('postgres', "a && b"),
+        ]:
+            with self.subTest(predicate=predicate):
+                # 1 + where + the predicate
+                self.assertEqual(3, sqlcc.calc(f"select a from t where {predicate}", dialect=dialect))
+
+    def test_like_any_counts_as_the_like(self):
+        self.assertEqual(3, sqlcc.calc("select a from t where a like any ('x%', 'y%')"))
+        self.assertEqual(3, sqlcc.calc("select a from t where a ilike any ('x%', 'y%')"))
+
+    def test_in_of_a_pivot_is_not_a_predicate(self):
+        self.assertEqual(1, sqlcc.calc("select * from t pivot(sum(v) for k in ('a', 'b'))"))
+        self.assertEqual(1, sqlcc.calc("select * from t unpivot(v for k in (a, b))"))
+        # 1 + where + in
+        self.assertEqual(3, sqlcc.calc("select * from t pivot(sum(v) for k in ('a', 'b')) where k in (1, 2)"))
+
+    def test_loops_count(self):
+        # 1 + recursive + union + where
+        sql = "with recursive x(n) as (select 1 union all select n + 1 from x where n < 5) select n from x"
+        self.assertEqual(4, sqlcc.calc(sql))
+        # 1 + union + where, a CTE which is not recursive adds nothing
+        self.assertEqual(3, sqlcc.calc(sql.replace("with recursive", "with")))
+        self.assertEqual(1, sqlcc.calc("with x as (select 1 as n) select n from x"))
+        # 1 + connect by
+        self.assertEqual(2, sqlcc.calc("select a from t start with p is null connect by prior id = p"))
+
+    def test_merge_counts_each_when(self):
+        sql = ("merge into t using s on t.id = s.id "
+               "when matched then update set a = s.a when not matched then insert (id) values (s.id)")
+        self.assertEqual(3, sqlcc.calc(sql))
+        sql = ("merge into t using s on t.id = s.id when matched and s.d then delete "
+               "when matched then update set a = s.a when not matched then insert (id) values (s.id)")
+        self.assertEqual(4, sqlcc.calc(sql))
+
+    def test_multi_table_insert_counts_each_when_but_not_the_else(self):
+        self.assertEqual(3, sqlcc.calc(
+            "insert all when a > 1 then into x when a <= 1 then into y else into z select a from t"))
+        self.assertEqual(1, sqlcc.calc("insert all into x into y select a from t"))
+
+    def test_insert_which_handles_a_conflict_counts(self):
+        self.assertEqual(2, sqlcc.calc("insert into t (a) values (1) on conflict (a) do nothing", dialect='postgres'))
+        self.assertEqual(2, sqlcc.calc(
+            "insert into t (a) values (1) on conflict (a) do update set a = 2", dialect='postgres'))
+        self.assertEqual(2, sqlcc.calc(
+            "insert into t (a) values (1) on duplicate key update a = 2", dialect='mysql'))
 
     def test_join(self):
         sql = """

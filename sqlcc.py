@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,32 +16,64 @@ MAX_SKIPPED_LISTED = 5
 # dbt adapter types that are named differently from the sqlglot dialect
 ADAPTER_DIALECTS = {'sqlserver': 'tsql'}
 
+
+def _if_arg(name: str) -> Callable[[sg.exp.Expression], int]:
+    return lambda node: 1 if node.args.get(name) else 0
+
+
+def _unless_parent(*classes: type) -> Callable[[sg.exp.Expression], int]:
+    return lambda node: 0 if isinstance(node.parent, classes) else 1
+
+
+def _named(*prefixes: str) -> Callable[[sg.exp.Expression], int]:
+    return lambda node: 1 if node.name.upper().startswith(prefixes) else 0
+
+
 # The weight each construct adds to the complexity. A node gets the weight of the most specific class
 # in its inheritance chain, so a Union counts as the SetOperation it is, and a node which has no class
-# in WEIGHTS adds nothing.
+# in WEIGHTS adds nothing. The weight is a number, or a function of the node when it depends on more
+# than the class.
 WEIGHTS = {
-    # Logic: HAVING is not weighted, its expression varies in length and is counted by what it contains
-    sg.exp.Where: 1, sg.exp.And: 1, sg.exp.Or: 1, sg.exp.In: 1, sg.exp.Between: 1,
-    sg.exp.Like: 1, sg.exp.ILike: 1, sg.exp.Group: 1,
+    # Logic: a filter (WHERE, HAVING, QUALIFY) counts 1, and its expression is counted by what it contains.
+    # The IN of a PIVOT lists the columns, and LIKE ANY counts as the LIKE
+    sg.exp.Where: 1, sg.exp.Having: 1, sg.exp.Qualify: 1, sg.exp.And: 1, sg.exp.Or: 1,
+    sg.exp.In: _unless_parent(sg.exp.Pivot), sg.exp.Between: 1, sg.exp.Like: 1, sg.exp.ILike: 1,
+    sg.exp.SimilarTo: 1, sg.exp.Group: 1,
+    sg.exp.Any: _unless_parent(sg.exp.Like, sg.exp.ILike, sg.exp.SimilarTo),
+    sg.exp.All: _unless_parent(sg.exp.Like, sg.exp.ILike, sg.exp.SimilarTo),
     # Functions: only the ones which branch count, and a CASE through its WHEN branches (sg.exp.If). The others,
     # like CAST and LOWER, take the same path whatever the data is. So do the ones sqlglot does not know
-    # (sg.exp.Anonymous), as nothing can be said about them.
+    # (sg.exp.Anonymous), as nothing can be said about them, except the ones which are named TRY_ or SAFE_
     sg.exp.If: 1, sg.exp.Coalesce: 1, sg.exp.Nullif: 1, sg.exp.Nvl2: 1, sg.exp.DecodeCase: 1,
     sg.exp.Greatest: 1, sg.exp.Least: 1, sg.exp.Exists: 1,
-    # A conversion which fails gives NULL, and that is a path of its own
-    sg.exp.TryCast: 1,
+    # The first or last row of a partition has no neighbour, which gives NULL or the default. The other window
+    # functions, like ROW_NUMBER, do not branch, and a filter on them is counted by the filter
+    sg.exp.Lag: 1, sg.exp.Lead: 1,
+    # A conversion which fails gives NULL, and that is a path of its own. sqlglot sets safe on the ones which do,
+    # like TRY_TO_NUMBER, TRY_CONVERT and TRY_PARSE_JSON, but also on CONCAT, which is only about NULL arguments
+    sg.exp.TryCast: 1, sg.exp.SafeDivide: 1, sg.exp.Func: _if_arg('safe'), sg.exp.Concat: 0,
+    sg.exp.Anonymous: _named('TRY_', 'SAFE_'),
     # Functions which are predicates, like LIKE and IN
     sg.exp.RegexpLike: 1, sg.exp.RegexpILike: 1, sg.exp.Contains: 1, sg.exp.StartsWith: 1,
-    sg.exp.EndsWith: 1, sg.exp.ArrayContains: 1, sg.exp.CountIf: 1,
+    sg.exp.EndsWith: 1, sg.exp.ArrayContains: 1, sg.exp.ArrayOverlaps: 1, sg.exp.CountIf: 1,
     # Sets: SetOperation is UNION, INTERSECT and EXCEPT
     sg.exp.Join: 1, sg.exp.SetOperation: 1,
+    # Loops: a recursive CTE, and CONNECT BY
+    sg.exp.With: _if_arg('recursive'), sg.exp.Connect: 1,
+    # Branches of a statement: WHEN of MERGE, WHEN of a multi table INSERT (not its ELSE), and ON CONFLICT
+    # or ON DUPLICATE KEY
+    sg.exp.When: 1, sg.exp.ConditionalInsert: _if_arg('expression'), sg.exp.OnConflict: 1,
 }
+# SAFE.f() of BigQuery returns NULL for an error. It is only known to sqlglot from a later version
+if hasattr(sg.exp, 'SafeFunc'):
+    WEIGHTS[sg.exp.SafeFunc] = 1
 
 
 def _weight(node: sg.exp.Expression) -> int:
     for cls in type(node).__mro__:
         if cls in WEIGHTS:
-            return WEIGHTS[cls]
+            weight = WEIGHTS[cls]
+            return weight(node) if callable(weight) else weight
     return 0
 
 
